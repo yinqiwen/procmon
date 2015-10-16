@@ -1,0 +1,10 @@
+{
+    "Home":"",
+    "Listen": "0.0.0.0:60000",
+    "Auth": "",
+    "Monitor": [
+        {
+            "Proc":"./example.exe -log_dir pkg"
+        }
+          ]
+}
