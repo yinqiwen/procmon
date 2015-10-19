@@ -1,7 +1,9 @@
 {
-    "Home":"",
+    "Daemonize":false,
     "Listen": "0.0.0.0:60000",
-    "Auth": "",
+    "Auth": "passwd",
+    "BackupDir":"./backup",
+    "UploadDir":"./upload",
     "Monitor": [
         {
             "Proc":"./example.exe -log_dir pkg"
