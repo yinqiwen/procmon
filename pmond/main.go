@@ -3,16 +3,25 @@ package main
 import (
 	"encoding/json"
 	"flag"
-	"fmt"
 	"github.com/golang/glog"
 	"io/ioutil"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"time"
 )
 
+type checkConfig struct {
+	Addr    string
+	Period  int
+	Timeout int
+}
+
 type procConfig struct {
-	Proc string
+	Proc   string
+	LogDir string
+	Env    []string
+	Check  checkConfig
 }
 
 type procMonConfig struct {
@@ -36,7 +45,7 @@ func (lw *LogWriter) Write(p []byte) (int, error) {
 
 func watchConfFile() {
 	confFileTime := int64(0)
-	check := func() {
+	reload := func() {
 		file, err := os.Open(confPath)
 		if nil != err {
 			glog.Errorf("%v\n", err)
@@ -68,11 +77,11 @@ func watchConfFile() {
 		}
 	}
 
-	check()
+	reload()
 	go func() {
 		for {
 			time.Sleep(5 * time.Second)
-			check()
+			reload()
 		}
 	}()
 }
@@ -85,14 +94,23 @@ func main() {
 	var err error
 	confPath, err = filepath.Abs(*conf)
 	if nil != err {
-		glog.Errorf("%v\n", err)
+		glog.Errorf("%v", err)
 		return
 	}
+
+	sc := make(chan os.Signal, 1)
+	signal.Notify(sc, os.Interrupt, os.Kill)
+	go func() {
+		_ = <-sc
+		killAll(&LogWriter{})
+		glog.Flush()
+		os.Exit(1)
+	}()
 
 	watchConfFile()
 	err = startAdminServer(Cfg.Listen)
 	if nil != err {
-		fmt.Printf("Bind socket failed:%v", err)
+		glog.Errorf("Bind socket failed:%v", err)
 		return
 	}
 }

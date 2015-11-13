@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -96,6 +97,7 @@ Rollback <File path>               Rollback updated file updated by 'fud'
 Start   <Process>                  Start process
 Restart <Process>                  WARN:restart process
 Stop    <Process>                  WARN:stop process
+Shutdown                           WARN:Stop whole service
 Exit                               exit current connection
 `
 	c.Write([]byte(usage))
@@ -145,7 +147,12 @@ func restartProc(cmd []string, c io.ReadWriteCloser) bool {
 }
 
 func system(cmd []string, c io.ReadWriteCloser) bool {
-	procCmd := exec.Command(cmd[0], cmd[1:]...)
+	var procCmd *exec.Cmd
+	if len(cmd) > 1 {
+		procCmd = exec.Command(cmd[0], cmd[1:]...)
+	} else {
+		procCmd = exec.Command(cmd[0])
+	}
 	procCmd.Env = os.Environ()
 	procCmd.Stdout = c
 	procCmd.Stderr = c
@@ -162,6 +169,7 @@ func system(cmd []string, c io.ReadWriteCloser) bool {
 func rollbackFile(args []string, c io.ReadWriteCloser) bool {
 	path := strings.TrimSpace(args[0])
 	backupPath := Cfg.BackupDir + "/" + path + ".bak"
+	os.MkdirAll(filepath.Dir(backupPath), 0770)
 	_, err := os.Stat(backupPath)
 	if nil != err {
 		io.WriteString(c, fmt.Sprintf("Failed rollback file:%s for reason:%v.", path, err))
@@ -191,6 +199,8 @@ func uploadFile(args []string, c io.ReadWriteCloser) bool {
 	path := strings.TrimSpace(args[0])
 	uploadPath := Cfg.UploadDir + "/" + path + ".new"
 	backupPath := Cfg.BackupDir + "/" + path + ".bak"
+	os.MkdirAll(filepath.Dir(uploadPath), 0770)
+	os.MkdirAll(filepath.Dir(backupPath), 0770)
 	if !recvFile(c, uploadPath) {
 		return false
 	}
@@ -212,6 +222,7 @@ func uploadFile(args []string, c io.ReadWriteCloser) bool {
 	if nil == err {
 		io.WriteString(c, fmt.Sprintf("Update file:%s success.\r\n", path))
 		if nil != mproc {
+			os.Chmod(path, 0755)
 			startService(path, &LogTraceWriter{c})
 			mproc.autoRestart = true
 		}
@@ -223,6 +234,11 @@ func uploadFile(args []string, c io.ReadWriteCloser) bool {
 		}
 		return false
 	}
+}
+
+func shutdown(cmd []string, c io.ReadWriteCloser) bool {
+	killAll(&LogTraceWriter{c})
+	return true
 }
 
 type bufReaderDirectWriter struct {
@@ -284,7 +300,6 @@ func startAdminServer(laddr string) error {
 	if nil != err {
 		return err
 	}
-	fmt.Printf("####lis %s\n", laddr)
 	for {
 		c, _ := l.Accept()
 		if nil != c {
@@ -304,4 +319,5 @@ func init() {
 	commandHandlers["start"] = &commandHandler{startProc, 1, 1}
 	commandHandlers["restart"] = &commandHandler{restartProc, 1, 1}
 	commandHandlers["stop"] = &commandHandler{stopProc, 1, 1}
+	commandHandlers["shutdown"] = &commandHandler{shutdown, 0, 0}
 }
