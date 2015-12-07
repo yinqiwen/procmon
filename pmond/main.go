@@ -3,12 +3,14 @@ package main
 import (
 	"encoding/json"
 	"flag"
-	"github.com/golang/glog"
 	"io/ioutil"
+	"net"
 	"os"
-	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
+
+	"github.com/golang/glog"
 )
 
 type checkConfig struct {
@@ -88,6 +90,8 @@ func watchConfFile() {
 
 func main() {
 	conf := flag.String("conf", "./conf/pmon.json", "config file")
+	var gracefulChild bool
+	flag.BoolVar(&gracefulChild, "graceful", false, "listen on fd open 3 (internal use only)")
 	flag.Parse()
 	defer glog.Flush()
 
@@ -98,19 +102,44 @@ func main() {
 		return
 	}
 
-	sc := make(chan os.Signal, 1)
-	signal.Notify(sc, os.Interrupt, os.Kill)
-	go func() {
-		_ = <-sc
-		killAll(&LogWriter{})
-		glog.Flush()
-		os.Exit(1)
-	}()
+	// sc := make(chan os.Signal, 1)
+	// signal.Notify(sc, os.Interrupt, os.Kill)
+	// go func() {
+	// 	_ = <-sc
+	// 	killAll(&LogWriter{})
+	// 	glog.Flush()
+	// 	os.Exit(1)
+	// }()
 
 	watchConfFile()
-	err = startAdminServer(Cfg.Listen)
+
+	//start admin server
+	var l net.Listener
+
+	if gracefulChild {
+		f := os.NewFile(3, "")
+		l, err = net.FileListener(f)
+	} else {
+		l, err = net.Listen("tcp", Cfg.Listen)
+	}
 	if nil != err {
 		glog.Errorf("Bind socket failed:%v", err)
 		return
+	}
+	tl := l.(*net.TCPListener)
+	listenFile, _ = tl.File()
+	if gracefulChild {
+		parent := syscall.Getppid()
+		glog.Infof("main: Killing parent pid: %v", parent)
+		if proc, _ := os.FindProcess(parent); nil != proc {
+			proc.Signal(syscall.SIGTERM)
+		}
+		//syscall.Kill(parent, syscall.SIGTERM)
+	}
+	for {
+		c, _ := l.Accept()
+		if nil != c {
+			processAdminConn(c) //only ONE admin connection allowd
+		}
 	}
 }

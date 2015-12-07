@@ -5,20 +5,25 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"github.com/golang/glog"
 	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/golang/glog"
 )
 
-var MAGIC_PMON_HEADER []byte = []byte("PMON")
-var EXEC_SUCCESS []byte = []byte("PMON_SUCCESS\r\n")
-var EXEC_FAIL []byte = []byte("PMON_FAIL\r\n")
+var MagicPmonHeader = []byte("PMON")
+var ExecSuccess = []byte("PMON_SUCCESS\r\n")
+var ExecFail = []byte("PMON_FAIL\r\n")
 
-func cp(dst, src string) error {
+// var MAGIC_PMON_HEADER []byte = []byte("PMON")
+// var EXEC_SUCCESS []byte = []byte("PMON_SUCCESS\r\n")
+// var EXEC_FAIL []byte = []byte("PMON_FAIL\r\n")
+
+func cp(dst, src string, mod os.FileMode) error {
 	s, err := os.Open(src)
 	if err != nil {
 		return err
@@ -30,6 +35,7 @@ func cp(dst, src string) error {
 	if err != nil {
 		return err
 	}
+	d.Chmod(mod)
 	if _, err := io.Copy(d, s); err != nil {
 		d.Close()
 		return err
@@ -37,14 +43,14 @@ func cp(dst, src string) error {
 	return d.Close()
 }
 
-func recvFile(c io.ReadWriteCloser, path string) bool {
+func recvFile(c io.ReadWriteCloser, path string, mod os.FileMode) bool {
 	headerbuf := make([]byte, 12)
 	_, err := io.ReadFull(c, headerbuf)
 	if err != nil {
 		c.Close()
 		return false
 	}
-	if !bytes.Equal(headerbuf[0:4], MAGIC_PMON_HEADER) {
+	if !bytes.Equal(headerbuf[0:4], MagicPmonHeader) {
 		glog.Errorf("Invalid magic header")
 		return false
 	}
@@ -52,7 +58,7 @@ func recvFile(c io.ReadWriteCloser, path string) bool {
 	binary.Read(bytes.NewReader(headerbuf[4:12]), binary.LittleEndian, &length)
 
 	var file *os.File
-	file, err = os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0660)
+	file, err = os.OpenFile(path, os.O_CREATE|os.O_RDWR, mod)
 	if nil != err {
 		io.WriteString(c, fmt.Sprintf("Open file:%s failed for reason:%v\r\n", path, err))
 		c.Close()
@@ -185,6 +191,9 @@ func rollbackFile(args []string, c io.ReadWriteCloser) bool {
 		if nil != mproc {
 			startService(path, &LogTraceWriter{c})
 		}
+		if path == os.Args[0] {
+			restartSelf(c)
+		}
 	} else {
 		io.WriteString(c, fmt.Sprintf("Rollback file %s failed for reason:%v\r\n", path, err))
 		if nil != mproc {
@@ -201,12 +210,16 @@ func uploadFile(args []string, c io.ReadWriteCloser) bool {
 	backupPath := Cfg.BackupDir + "/" + path + ".bak"
 	os.MkdirAll(filepath.Dir(uploadPath), 0770)
 	os.MkdirAll(filepath.Dir(backupPath), 0770)
-	if !recvFile(c, uploadPath) {
+	defaultPerm := os.FileMode(0660)
+	if st, err := os.Lstat(path); nil == err {
+		defaultPerm = st.Mode()
+	}
+	if !recvFile(c, uploadPath, defaultPerm) {
 		return false
 	}
 	_, err := os.Stat(path)
 	if nil == err || !os.IsNotExist(err) {
-		err = cp(backupPath, path)
+		err = cp(backupPath, path, defaultPerm)
 		if nil != err {
 			io.WriteString(c, fmt.Sprintf("Failed backup file:%s for reason:%v.", path, err))
 			return false
@@ -216,7 +229,7 @@ func uploadFile(args []string, c io.ReadWriteCloser) bool {
 	if nil != mproc {
 		killService(path, &LogTraceWriter{c})
 	} else {
-		fmt.Printf("No proc found for %s\n", path)
+		//fmt.Printf("No proc found for %s\n", path)
 	}
 	err = os.Rename(uploadPath, path)
 	if nil == err {
@@ -225,6 +238,10 @@ func uploadFile(args []string, c io.ReadWriteCloser) bool {
 			os.Chmod(path, 0755)
 			startService(path, &LogTraceWriter{c})
 			mproc.autoRestart = true
+		}
+		if path == os.Args[0] {
+			fmt.Fprintf(c, "Start restart pmond self.\n")
+			restartSelf(c)
 		}
 		return true
 	} else {
@@ -283,9 +300,9 @@ func processAdminConn(c net.Conn) {
 			}
 			glog.Infof("Execute %v from client:%v", cmd, c.RemoteAddr())
 			if h.handler(args, rw) {
-				rw.Write(EXEC_SUCCESS)
+				rw.Write(ExecSuccess)
 			} else {
-				rw.Write(EXEC_FAIL)
+				rw.Write(ExecFail)
 			}
 		} else {
 			io.WriteString(rw, fmt.Sprintf("Error:unknown command:%v\r\n", cmd))
@@ -293,19 +310,6 @@ func processAdminConn(c net.Conn) {
 		}
 	}
 	c.Close()
-}
-
-func startAdminServer(laddr string) error {
-	l, err := net.Listen("tcp", laddr)
-	if nil != err {
-		return err
-	}
-	for {
-		c, _ := l.Accept()
-		if nil != c {
-			processAdminConn(c) //only ONE admin connection allowd
-		}
-	}
 }
 
 func init() {

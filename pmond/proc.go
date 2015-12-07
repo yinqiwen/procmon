@@ -2,10 +2,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/golang/glog"
-	"github.com/yinqiwen/gotoolkit/iotools"
 	"io"
-	//"os"
 	"net"
 	"os"
 	"os/exec"
@@ -13,7 +10,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/golang/glog"
+	"github.com/yinqiwen/gotoolkit/iotools"
 )
+
+var listenFile *os.File
 
 type ProcOutput struct {
 	fname string
@@ -136,9 +138,8 @@ func (mproc *monitorProc) check(wr io.Writer) bool {
 			mproc.procCmd.Process.Kill()
 			glog.Errorf("Kill process:%s since check failed by reason:%v", mproc.processName, err)
 			return true
-		} else {
-			c.Close()
 		}
+		c.Close()
 	}
 	return false
 }
@@ -170,11 +171,9 @@ func (mproc *monitorProc) start(wr io.Writer) {
 			mproc.output = &ProcOutput{outputfileName, nil}
 			go func() {
 				io.Copy(mproc.output, stderrpipe)
-				//mproc.output.Close()
 			}()
 			go func() {
 				io.Copy(mproc.output, stdoutpipe)
-				//mproc.output.Close()
 			}()
 		}
 	}
@@ -302,6 +301,38 @@ func dumpPids() {
 		if mproc.isRunning() {
 			fmt.Fprintf(file, "%d\n", mproc.procCmd.Process.Pid)
 		}
+	}
+}
+
+func restartSelf(wr io.Writer) {
+	for _, proc := range procTable.procNames {
+		mproc := getService(proc)
+		if nil != mproc {
+			mproc.autoRestart = false
+			mproc.kill(wr)
+		}
+	}
+	path := os.Args[0]
+	args := os.Args[1:]
+	hasGracefulFlal := false
+	for _, arg := range args {
+		if arg == "-graceful" {
+			hasGracefulFlal = true
+			break
+		}
+	}
+	if !hasGracefulFlal {
+		args = append(args, "-graceful")
+	}
+	fmt.Fprintf(wr, "Restart pmond self.\n")
+	cmd := exec.Command(path, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.ExtraFiles = []*os.File{listenFile}
+
+	err := cmd.Start()
+	if err != nil {
+		fmt.Fprintf(wr, "gracefulRestart: Failed to launch, error: %v\n", err)
 	}
 }
 
