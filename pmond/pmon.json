@@ -3,10 +3,11 @@
     "Auth": "passwd",
     "BackupDir":"./backup",
     "UploadDir":"./upload",
+    "LogDir":"./logs",
     "Monitor": [
         {
             "Proc":"./example.exe -log_dir pkg",
-            "LogDir":"./logs",
+            "LogFile":"",
             "Env" :["GOGCTRACE=1"],
             "Check":{
                 "Addr": "127.0.0.1:7788",

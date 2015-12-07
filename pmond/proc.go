@@ -64,7 +64,7 @@ type monitorProc struct {
 	processName   string
 	args          []string
 	env           []string
-	logDir        string
+	logFile       string
 	procCmd       *exec.Cmd
 	output        *ProcOutput
 	autoRestart   bool
@@ -87,7 +87,7 @@ func (mproc *monitorProc) wait() bool {
 	cmd := mproc.procCmd
 	mproc.lk.Unlock()
 	cmd.Wait()
-	glog.Infof("Process:%s stoped.", mproc.processName)
+	glog.Infof("Process:%s %v stoped.", mproc.processName, mproc.args)
 	mproc.lk.Lock()
 	defer mproc.lk.Unlock()
 	if cmd == mproc.procCmd {
@@ -155,27 +155,24 @@ func (mproc *monitorProc) start(wr io.Writer) {
 	mproc.procCmd = exec.Command(mproc.processName, mproc.args...)
 	mproc.procCmd.Env = append(os.Environ(), mproc.env...)
 
-	if len(mproc.logDir) > 0 {
-		var stderrpipe, stdoutpipe io.ReadCloser
-		stderrpipe, err = mproc.procCmd.StderrPipe()
-		if nil == err {
-			stdoutpipe, err = mproc.procCmd.StdoutPipe()
+	var stderrpipe, stdoutpipe io.ReadCloser
+	stderrpipe, err = mproc.procCmd.StderrPipe()
+	if nil == err {
+		stdoutpipe, err = mproc.procCmd.StdoutPipe()
+	}
+	if nil != err {
+		glog.Errorf("%v", err)
+	} else {
+		if nil != mproc.output {
+			mproc.output.Close()
 		}
-		if nil != err {
-			glog.Errorf("%v", err)
-		} else {
-			outputfileName := fmt.Sprintf("%s/%s.out", mproc.logDir, filepath.Base(mproc.processName))
-			if nil != mproc.output {
-				mproc.output.Close()
-			}
-			mproc.output = &ProcOutput{outputfileName, nil}
-			go func() {
-				io.Copy(mproc.output, stderrpipe)
-			}()
-			go func() {
-				io.Copy(mproc.output, stdoutpipe)
-			}()
-		}
+		mproc.output = &ProcOutput{mproc.logFile, nil}
+		go func() {
+			io.Copy(mproc.output, stderrpipe)
+		}()
+		go func() {
+			io.Copy(mproc.output, stdoutpipe)
+		}()
 	}
 	err = mproc.procCmd.Start()
 	if err != nil {
@@ -189,7 +186,6 @@ func (mproc *monitorProc) start(wr io.Writer) {
 }
 
 type monitorProcTable struct {
-	procNames    []string
 	monitorProcs map[string]*monitorProc
 	mlk          sync.Mutex
 }
@@ -204,20 +200,25 @@ func newMonitorProcTable() *monitorProcTable {
 
 func buildMonitorProcs() {
 	procTable.mlk.Lock()
-	procTable.procNames = make([]string, 0)
 	for _, proc := range Cfg.Monitor {
 		cmd := strings.Fields(proc.Proc)
 		mproc, ok := procTable.monitorProcs[proc.Proc]
-		procTable.procNames = append(procTable.procNames, cmd[0])
+		//procTable.procNames = append(procTable.procNames, cmd[0])
 		if !ok {
 			mproc = new(monitorProc)
 			mproc.processName = cmd[0]
-			procTable.monitorProcs[mproc.processName] = mproc
+			mproc.args = cmd[1:]
 			mproc.autoRestart = true
+			procTable.monitorProcs[proc.Proc] = mproc
 		}
-		mproc.args = cmd[1:]
 		mproc.env = proc.Env
-		mproc.logDir = proc.LogDir
+		mproc.logFile = proc.LogFile
+		if len(mproc.logFile) == 0 {
+			mproc.logFile = filepath.Base(mproc.processName) + ".out"
+		}
+		if !strings.HasPrefix(mproc.logFile, "/") {
+			mproc.logFile = Cfg.LogDir + "/" + mproc.logFile
+		}
 		mproc.checkCfg = proc.Check
 	}
 	procTable.mlk.Unlock()
@@ -228,15 +229,26 @@ func getService(proc string) *monitorProc {
 	defer procTable.mlk.Unlock()
 	if mproc, ok := procTable.monitorProcs[proc]; ok {
 		return mproc
-	} else {
-		return nil
 	}
+	return nil
+}
+
+func getProcListByName(name string) []*monitorProc {
+	var procs []*monitorProc
+	procTable.mlk.Lock()
+	defer procTable.mlk.Unlock()
+	for k, proc := range procTable.monitorProcs {
+		if strings.HasPrefix(k, name) {
+			procs = append(procs, proc)
+		}
+	}
+	return procs
 }
 
 func listProcs(wr io.Writer) {
 	procTable.mlk.Lock()
 	defer procTable.mlk.Unlock()
-	wr.Write([]byte("PID   Process	Status\r\n"))
+	wr.Write([]byte("PID   Process	Args		Status\r\n"))
 	for _, mproc := range procTable.monitorProcs {
 		pid := -1
 		status := "stoped"
@@ -244,47 +256,19 @@ func listProcs(wr io.Writer) {
 			pid = mproc.procCmd.Process.Pid
 			status = "running"
 		}
-		io.WriteString(wr, fmt.Sprintf("%d   %s	%s\r\n", pid, mproc.processName, status))
-	}
-}
-
-func killService(proc string, wr io.Writer) {
-	mproc := getService(proc)
-	if nil != mproc {
-		mproc.kill(wr)
-	} else {
-		io.WriteString(wr, fmt.Sprintf("No running process:%s\r\n", proc))
+		io.WriteString(wr, fmt.Sprintf("%d   %s	%v		%s\r\n", pid, mproc.processName, mproc.args, status))
 	}
 }
 
 var pidFile string = ".pids"
 
 func killAll(wr io.Writer) {
-	for _, proc := range procTable.procNames {
-		mproc := getService(proc)
+	for _, mproc := range procTable.monitorProcs {
 		if nil != mproc {
 			mproc.kill(wr)
 		}
 	}
-	//os.Remove(pidFile)
 	os.Exit(1)
-}
-
-func restartService(proc string, wr io.Writer) {
-	mproc := getService(proc)
-	if nil != mproc {
-		mproc.kill(wr)
-	}
-	mproc.start(wr)
-}
-
-func startService(proc string, wr io.Writer) {
-	mproc := getService(proc)
-	if nil != mproc && nil != mproc.procCmd {
-		io.WriteString(wr, fmt.Sprintf("Process:%s already started.\r\n", proc))
-		return
-	}
-	mproc.start(wr)
 }
 
 func dumpPids() {
@@ -305,10 +289,8 @@ func dumpPids() {
 }
 
 func restartSelf(wr io.Writer) {
-	for _, proc := range procTable.procNames {
-		mproc := getService(proc)
+	for _, mproc := range procTable.monitorProcs {
 		if nil != mproc {
-			mproc.autoRestart = false
 			mproc.kill(wr)
 		}
 	}
@@ -332,7 +314,7 @@ func restartSelf(wr io.Writer) {
 
 	err := cmd.Start()
 	if err != nil {
-		fmt.Fprintf(wr, "gracefulRestart: Failed to launch, error: %v\n", err)
+		glog.Fatalf("gracefulRestart: Failed to launch, error: %v", err)
 	}
 }
 
@@ -345,8 +327,8 @@ func init() {
 			select {
 			case <-checkTickChan:
 				changed := false
-				for _, proc := range procTable.procNames {
-					mproc := getService(proc)
+				for _, procCfg := range Cfg.Monitor {
+					mproc := getService(procCfg.Proc)
 					if nil != mproc {
 						if mproc.check(&LogWriter{}) {
 							changed = true

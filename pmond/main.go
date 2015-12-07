@@ -20,10 +20,10 @@ type checkConfig struct {
 }
 
 type procConfig struct {
-	Proc   string
-	LogDir string
-	Env    []string
-	Check  checkConfig
+	Proc    string
+	LogFile string
+	Env     []string
+	Check   checkConfig
 }
 
 type procMonConfig struct {
@@ -31,6 +31,7 @@ type procMonConfig struct {
 	Auth      string
 	BackupDir string
 	UploadDir string
+	LogDir    string
 	Monitor   []procConfig
 }
 
@@ -72,8 +73,17 @@ func watchConfFile() {
 			if len(Cfg.BackupDir) == 0 {
 				Cfg.BackupDir = "./backup"
 			}
+
+			if len(Cfg.LogDir) == 0 {
+				if logDirFlag := flag.Lookup("log_dir"); nil != logDirFlag {
+					Cfg.LogDir = logDirFlag.Value.String()
+				} else {
+					Cfg.LogDir = "./logs"
+				}
+			}
 			os.MkdirAll(Cfg.UploadDir, 0770)
 			os.MkdirAll(Cfg.BackupDir, 0770)
+			os.MkdirAll(Cfg.LogDir, 0770)
 			confFileTime = st.ModTime().Unix()
 			buildMonitorProcs()
 		}

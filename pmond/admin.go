@@ -19,9 +19,6 @@ var MagicPmonHeader = []byte("PMON")
 var ExecSuccess = []byte("PMON_SUCCESS\r\n")
 var ExecFail = []byte("PMON_FAIL\r\n")
 
-// var MAGIC_PMON_HEADER []byte = []byte("PMON")
-// var EXEC_SUCCESS []byte = []byte("PMON_SUCCESS\r\n")
-// var EXEC_FAIL []byte = []byte("PMON_FAIL\r\n")
 
 func cp(dst, src string, mod os.FileMode) error {
 	s, err := os.Open(src)
@@ -92,7 +89,7 @@ type commandHandler struct {
 	maxArgs int
 }
 
-var commandHandlers map[string]*commandHandler = make(map[string]*commandHandler)
+var commandHandlers = make(map[string]*commandHandler)
 
 func help(cmd []string, c io.ReadWriteCloser) bool {
 	usage := `
@@ -121,9 +118,14 @@ func quit(cmd []string, c io.ReadWriteCloser) bool {
 }
 
 func startProc(cmd []string, c io.ReadWriteCloser) bool {
-	mproc := getService(cmd[0])
-	if nil != mproc {
-		startService(cmd[0], &LogTraceWriter{c})
+	procs := getProcListByName(cmd[0])
+	if len(procs) > 0 {
+		tracer := &LogTraceWriter{c}
+		for _, proc := range procs {
+			if nil != proc {
+				proc.start(tracer)
+			}
+		}
 	} else {
 		io.WriteString(c, fmt.Sprintf("No process '%s' configured\r\n", cmd[0]))
 		return false
@@ -131,9 +133,14 @@ func startProc(cmd []string, c io.ReadWriteCloser) bool {
 	return true
 }
 func stopProc(cmd []string, c io.ReadWriteCloser) bool {
-	mproc := getService(cmd[0])
-	if nil != mproc {
-		killService(cmd[0], &LogTraceWriter{c})
+	procs := getProcListByName(cmd[0])
+	if len(procs) > 0 {
+		tracer := &LogTraceWriter{c}
+		for _, proc := range procs {
+			if nil != proc {
+				proc.kill(tracer)
+			}
+		}
 	} else {
 		io.WriteString(c, fmt.Sprintf("No process '%s' configured\r\n", cmd[0]))
 		return false
@@ -141,10 +148,15 @@ func stopProc(cmd []string, c io.ReadWriteCloser) bool {
 	return true
 }
 func restartProc(cmd []string, c io.ReadWriteCloser) bool {
-	mproc := getService(cmd[0])
-	if nil != mproc {
-		killService(cmd[0], &LogTraceWriter{c})
-		startService(cmd[0], &LogTraceWriter{c})
+	procs := getProcListByName(cmd[0])
+	if len(procs) > 0 {
+		tracer := &LogTraceWriter{c}
+		for _, proc := range procs {
+			if nil != proc {
+				proc.kill(tracer)
+				proc.start(tracer)
+			}
+		}
 	} else {
 		io.WriteString(c, fmt.Sprintf("No process '%s' configured\r\n", cmd[0]))
 		return false
@@ -166,9 +178,8 @@ func system(cmd []string, c io.ReadWriteCloser) bool {
 	if nil != err {
 		io.WriteString(c, fmt.Sprintf("Failed to exec command for reason:%v\r\n", err))
 		return false
-	} else {
-		procCmd.Wait()
 	}
+	procCmd.Wait()
 	return true
 }
 
@@ -181,27 +192,33 @@ func rollbackFile(args []string, c io.ReadWriteCloser) bool {
 		io.WriteString(c, fmt.Sprintf("Failed rollback file:%s for reason:%v.", path, err))
 		return false
 	}
-	mproc := getService(path)
-	if nil != mproc {
-		killService(path, &LogTraceWriter{c})
+	procs := getProcListByName(path)
+	tracer := &LogTraceWriter{c}
+	for _, proc := range procs {
+		if nil != proc {
+			proc.kill(tracer)
+		}
 	}
 	err = os.Rename(backupPath, path)
 	if nil == err {
 		io.WriteString(c, fmt.Sprintf("Rollback file:%s success.\r\n", path))
-		if nil != mproc {
-			startService(path, &LogTraceWriter{c})
+		for _, proc := range procs {
+			if nil != proc {
+				proc.start(tracer)
+			}
 		}
 		if path == os.Args[0] {
 			restartSelf(c)
 		}
 	} else {
 		io.WriteString(c, fmt.Sprintf("Rollback file %s failed for reason:%v\r\n", path, err))
-		if nil != mproc {
-			mproc.autoRestart = true
-		}
-		return false
 	}
-	return true
+	for _, proc := range procs {
+		if nil != proc {
+			proc.autoRestart = true
+		}
+	}
+	return nil == err
 }
 
 func uploadFile(args []string, c io.ReadWriteCloser) bool {
@@ -225,32 +242,36 @@ func uploadFile(args []string, c io.ReadWriteCloser) bool {
 			return false
 		}
 	}
-	mproc := getService(path)
-	if nil != mproc {
-		killService(path, &LogTraceWriter{c})
-	} else {
-		//fmt.Printf("No proc found for %s\n", path)
+	procs := getProcListByName(path)
+	tracer := &LogTraceWriter{c}
+	for _, proc := range procs {
+		if nil != proc {
+			proc.kill(tracer)
+		}
 	}
 	err = os.Rename(uploadPath, path)
 	if nil == err {
 		io.WriteString(c, fmt.Sprintf("Update file:%s success.\r\n", path))
-		if nil != mproc {
+		if len(procs) > 0 {
 			os.Chmod(path, 0755)
-			startService(path, &LogTraceWriter{c})
-			mproc.autoRestart = true
+			for _, proc := range procs {
+				if nil != proc {
+					proc.start(tracer)
+				}
+			}
 		}
 		if path == os.Args[0] {
-			fmt.Fprintf(c, "Start restart pmond self.\n")
 			restartSelf(c)
 		}
-		return true
 	} else {
 		io.WriteString(c, fmt.Sprintf("Failed to rename update file %s for reason:%v\r\n", path, err))
-		if nil != mproc {
-			mproc.autoRestart = true
-		}
-		return false
 	}
+	for _, proc := range procs {
+		if nil != proc {
+			proc.autoRestart = true
+		}
+	}
+	return nil == err
 }
 
 func shutdown(cmd []string, c io.ReadWriteCloser) bool {
