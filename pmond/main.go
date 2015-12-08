@@ -27,12 +27,13 @@ type procConfig struct {
 }
 
 type procMonConfig struct {
-	Listen    string
-	Auth      string
-	BackupDir string
-	UploadDir string
-	LogDir    string
-	Monitor   []procConfig
+	Listen        string
+	Auth          string
+	BackupDir     string
+	MaxBackupFile int
+	UploadDir     string
+	LogDir        string
+	Monitor       []procConfig
 }
 
 var Cfg procMonConfig

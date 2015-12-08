@@ -200,6 +200,9 @@ func newMonitorProcTable() *monitorProcTable {
 
 func buildMonitorProcs() {
 	procTable.mlk.Lock()
+	if Cfg.MaxBackupFile == 0 {
+		Cfg.MaxBackupFile = 10
+	}
 	for _, proc := range Cfg.Monitor {
 		cmd := strings.Fields(proc.Proc)
 		mproc, ok := procTable.monitorProcs[proc.Proc]

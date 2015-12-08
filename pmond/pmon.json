@@ -2,6 +2,7 @@
     "Listen": "0.0.0.0:60000",
     "Auth": "passwd",
     "BackupDir":"./backup",
+    "MaxBackupFile" : 10,
     "UploadDir":"./upload",
     "LogDir":"./logs",
     "Monitor": [

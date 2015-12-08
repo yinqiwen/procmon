@@ -6,10 +6,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/golang/glog"
@@ -18,7 +21,6 @@ import (
 var MagicPmonHeader = []byte("PMON")
 var ExecSuccess = []byte("PMON_SUCCESS\r\n")
 var ExecFail = []byte("PMON_FAIL\r\n")
-
 
 func cp(dst, src string, mod os.FileMode) error {
 	s, err := os.Open(src)
@@ -38,6 +40,25 @@ func cp(dst, src string, mod os.FileMode) error {
 		return err
 	}
 	return d.Close()
+}
+
+func cleanOldBackupFiles(path string) {
+	basename := filepath.Base(path)
+	dir := filepath.Dir(path)
+	files, _ := ioutil.ReadDir(dir)
+	var filePaths []string
+	for _, f := range files {
+		fpath := dir + "/" + f.Name()
+		if strings.HasPrefix(f.Name(), basename) {
+			filePaths = append(filePaths, fpath)
+		}
+	}
+	if len(filePaths) > Cfg.MaxBackupFile {
+		sort.Strings(filePaths)
+		for i := 0; i < len(filePaths)-Cfg.MaxBackupFile; i++ {
+			os.Remove(filePaths[i])
+		}
+	}
 }
 
 func recvFile(c io.ReadWriteCloser, path string, mod os.FileMode) bool {
@@ -96,7 +117,7 @@ func help(cmd []string, c io.ReadWriteCloser) bool {
 Supported Commands:
 PS                                 list current running process
 System   <command> <args>          WARN:Exec System Command!
-Rollback <File path>               Rollback updated file updated by 'fud'
+Rollback <File path> <Postfix>     Rollback updated file
 Start   <Process>                  Start process
 Restart <Process>                  WARN:restart process
 Stop    <Process>                  WARN:stop process
@@ -185,9 +206,30 @@ func system(cmd []string, c io.ReadWriteCloser) bool {
 
 func rollbackFile(args []string, c io.ReadWriteCloser) bool {
 	path := strings.TrimSpace(args[0])
-	backupPath := Cfg.BackupDir + "/" + path + ".bak"
-	os.MkdirAll(filepath.Dir(backupPath), 0770)
-	_, err := os.Stat(backupPath)
+	basename := filepath.Base(path)
+	backupDir := filepath.Dir(Cfg.BackupDir + "/" + path)
+	backupFiles, _ := ioutil.ReadDir(backupDir)
+
+	var backupPath string
+	if len(args) == 1 {
+		var backupPaths []string
+		for _, f := range backupFiles {
+			//only select files with name format <name>.<timestamp>, the timestamp have 14 number chars
+			if matched, _ := regexp.MatchString(basename+".[0-9]{14}", f.Name()); matched {
+				fpath := backupDir + "/" + f.Name()
+				backupPaths = append(backupPaths, fpath)
+			}
+		}
+		sort.Strings(backupPaths)
+		if len(backupPaths) == 0 {
+			fmt.Fprintf(c, "Failed rollback file:%s bacauseof no backup files found.", path)
+			return false
+		}
+		backupPath = backupPaths[len(backupPaths)-1]
+	} else {
+		backupPath = backupDir + "/" + basename + "." + args[1]
+	}
+	st, err := os.Stat(backupPath)
 	if nil != err {
 		io.WriteString(c, fmt.Sprintf("Failed rollback file:%s for reason:%v.", path, err))
 		return false
@@ -199,9 +241,9 @@ func rollbackFile(args []string, c io.ReadWriteCloser) bool {
 			proc.kill(tracer)
 		}
 	}
-	err = os.Rename(backupPath, path)
+	err = cp(path, backupPath, st.Mode())
 	if nil == err {
-		io.WriteString(c, fmt.Sprintf("Rollback file:%s success.\r\n", path))
+		io.WriteString(c, fmt.Sprintf("Rollback file:%s from %s success.\r\n", path, backupPath))
 		for _, proc := range procs {
 			if nil != proc {
 				proc.start(tracer)
@@ -224,9 +266,7 @@ func rollbackFile(args []string, c io.ReadWriteCloser) bool {
 func uploadFile(args []string, c io.ReadWriteCloser) bool {
 	path := strings.TrimSpace(args[0])
 	uploadPath := Cfg.UploadDir + "/" + path + ".new"
-	backupPath := Cfg.BackupDir + "/" + path + ".bak"
 	os.MkdirAll(filepath.Dir(uploadPath), 0770)
-	os.MkdirAll(filepath.Dir(backupPath), 0770)
 	defaultPerm := os.FileMode(0660)
 	if st, err := os.Lstat(path); nil == err {
 		defaultPerm = st.Mode()
@@ -234,13 +274,17 @@ func uploadFile(args []string, c io.ReadWriteCloser) bool {
 	if !recvFile(c, uploadPath, defaultPerm) {
 		return false
 	}
-	_, err := os.Stat(path)
-	if nil == err || !os.IsNotExist(err) {
+	st, err := os.Stat(path)
+	if nil == err {
+		backupPath := Cfg.BackupDir + "/" + path + st.ModTime().Format(".20060102150405")
+		os.MkdirAll(filepath.Dir(backupPath), 0770)
 		err = cp(backupPath, path, defaultPerm)
 		if nil != err {
-			io.WriteString(c, fmt.Sprintf("Failed backup file:%s for reason:%v.", path, err))
+			io.WriteString(c, fmt.Sprintf("Failed backup file:%s for reason:%v\n", path, err))
 			return false
 		}
+		fmt.Fprintf(c, "Backup file %s to %s succeess.\r\n", path, backupPath)
+		cleanOldBackupFiles(backupPath)
 	}
 	procs := getProcListByName(path)
 	tracer := &LogTraceWriter{c}
@@ -249,6 +293,7 @@ func uploadFile(args []string, c io.ReadWriteCloser) bool {
 			proc.kill(tracer)
 		}
 	}
+
 	err = os.Rename(uploadPath, path)
 	if nil == err {
 		io.WriteString(c, fmt.Sprintf("Update file:%s success.\r\n", path))
@@ -340,7 +385,7 @@ func init() {
 	commandHandlers["exit"] = &commandHandler{quit, 0, 0}
 	commandHandlers["quit"] = &commandHandler{quit, 0, 0}
 	commandHandlers["upload"] = &commandHandler{uploadFile, 1, 1}
-	commandHandlers["rollback"] = &commandHandler{rollbackFile, 1, 1}
+	commandHandlers["rollback"] = &commandHandler{rollbackFile, 1, 2}
 	commandHandlers["start"] = &commandHandler{startProc, 1, 1}
 	commandHandlers["restart"] = &commandHandler{restartProc, 1, 1}
 	commandHandlers["stop"] = &commandHandler{stopProc, 1, 1}
