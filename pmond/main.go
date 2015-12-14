@@ -19,10 +19,16 @@ type checkConfig struct {
 	Timeout int
 }
 
+type crashConfig struct {
+	Prefix  string
+	Command []string
+}
+
 type procConfig struct {
 	Proc    string
 	LogFile string
 	Env     []string
+	Crash   crashConfig
 	Check   checkConfig
 }
 

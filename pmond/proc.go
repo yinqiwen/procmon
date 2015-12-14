@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
@@ -18,8 +20,11 @@ import (
 var listenFile *os.File
 
 type ProcOutput struct {
-	fname string
-	log   *iotools.RotateFile
+	fname        string
+	crashOutput  bool
+	crashContent bytes.Buffer
+	proc         *monitorProc
+	log          *iotools.RotateFile
 }
 
 func (pout *ProcOutput) reopen() {
@@ -46,6 +51,10 @@ func (pout *ProcOutput) Write(p []byte) (int, error) {
 	if nil == pout.log {
 		return 0, fmt.Errorf("Log file %s not open", pout.fname)
 	}
+	if pout.crashOutput || (len(pout.proc.cfg.Crash.Prefix) > 0 && bytes.HasPrefix(p, []byte(pout.proc.cfg.Crash.Prefix))) {
+		pout.crashOutput = true
+		pout.crashContent.Write(p)
+	}
 	return pout.log.Write(p)
 }
 
@@ -63,12 +72,10 @@ func (pout *ProcOutput) Close() error {
 type monitorProc struct {
 	processName   string
 	args          []string
-	env           []string
-	logFile       string
 	procCmd       *exec.Cmd
 	output        *ProcOutput
 	autoRestart   bool
-	checkCfg      checkConfig
+	cfg           procConfig
 	lastCheckTime int64
 	lk            sync.Mutex
 }
@@ -85,6 +92,8 @@ func (mproc *monitorProc) wait() bool {
 	}
 	mproc.lk.Lock()
 	cmd := mproc.procCmd
+	output := mproc.output
+	crashFileName := fmt.Sprintf("%s/%s-crash-%d.log", Cfg.LogDir, filepath.Base(mproc.processName), cmd.Process.Pid)
 	mproc.lk.Unlock()
 	cmd.Wait()
 	glog.Infof("Process:%s %v stoped.", mproc.processName, mproc.args)
@@ -92,6 +101,18 @@ func (mproc *monitorProc) wait() bool {
 	defer mproc.lk.Unlock()
 	if cmd == mproc.procCmd {
 		mproc.procCmd = nil
+	}
+
+	if output.crashContent.Len() > 0 {
+		ioutil.WriteFile(crashFileName, output.crashContent.Bytes(), 0666)
+		if len(mproc.cfg.Crash.Command) > 0 {
+			args := mproc.cfg.Crash.Command[1:]
+			for i := 0; i < len(args); i++ {
+				args[i] = strings.Replace(args[i], "${CrashContent}", output.crashContent.String(), -1)
+				args[i] = strings.Replace(args[i], "${HOSTNAME}", os.Getenv("HOSTNAME"), -1)
+			}
+			exec.Command(mproc.cfg.Crash.Command[0], args...).Run()
+		}
 	}
 	return true
 }
@@ -124,16 +145,16 @@ func (mproc *monitorProc) check(wr io.Writer) bool {
 	if !mproc.isRunning() && !mproc.autoRestart {
 		return false
 	}
-	if len(mproc.checkCfg.Addr) == 0 {
+	if len(mproc.cfg.Check.Addr) == 0 {
 		return false
 	}
 	now := time.Now().Unix()
 	if mproc.lastCheckTime == 0 {
 		mproc.lastCheckTime = now
 	}
-	if now-mproc.lastCheckTime >= int64(mproc.checkCfg.Period) {
+	if now-mproc.lastCheckTime >= int64(mproc.cfg.Check.Period) {
 		mproc.lastCheckTime = now
-		c, err := net.DialTimeout("tcp", mproc.checkCfg.Addr, time.Duration(mproc.checkCfg.Timeout)*time.Second)
+		c, err := net.DialTimeout("tcp", mproc.cfg.Check.Addr, time.Duration(mproc.cfg.Check.Timeout)*time.Second)
 		if nil != err {
 			mproc.procCmd.Process.Kill()
 			glog.Errorf("Kill process:%s since check failed by reason:%v", mproc.processName, err)
@@ -153,7 +174,7 @@ func (mproc *monitorProc) start(wr io.Writer) {
 	mproc.lk.Lock()
 	defer mproc.lk.Unlock()
 	mproc.procCmd = exec.Command(mproc.processName, mproc.args...)
-	mproc.procCmd.Env = append(os.Environ(), mproc.env...)
+	mproc.procCmd.Env = append(os.Environ(), mproc.cfg.Env...)
 
 	var stderrpipe, stdoutpipe io.ReadCloser
 	stderrpipe, err = mproc.procCmd.StderrPipe()
@@ -166,7 +187,9 @@ func (mproc *monitorProc) start(wr io.Writer) {
 		if nil != mproc.output {
 			mproc.output.Close()
 		}
-		mproc.output = &ProcOutput{mproc.logFile, nil}
+		mproc.output = &ProcOutput{}
+		mproc.output.fname = mproc.cfg.LogFile
+		mproc.output.proc = mproc
 		go func() {
 			io.Copy(mproc.output, stderrpipe)
 		}()
@@ -180,6 +203,7 @@ func (mproc *monitorProc) start(wr io.Writer) {
 		io.WriteString(wr, fmt.Sprintf("Failed to start process:%s for reason:%v\r\n", mproc.processName, err))
 		return
 	}
+
 	io.WriteString(wr, fmt.Sprintf("Start process:%s %v success.\r\n", mproc.processName, mproc.args))
 	mproc.autoRestart = true
 	go mproc.wait()
@@ -214,15 +238,13 @@ func buildMonitorProcs() {
 			mproc.autoRestart = true
 			procTable.monitorProcs[proc.Proc] = mproc
 		}
-		mproc.env = proc.Env
-		mproc.logFile = proc.LogFile
-		if len(mproc.logFile) == 0 {
-			mproc.logFile = filepath.Base(mproc.processName) + ".out"
+		mproc.cfg = proc
+		if len(mproc.cfg.LogFile) == 0 {
+			mproc.cfg.LogFile = filepath.Base(mproc.processName) + ".out"
 		}
-		if !strings.HasPrefix(mproc.logFile, "/") {
-			mproc.logFile = Cfg.LogDir + "/" + mproc.logFile
+		if !strings.HasPrefix(mproc.cfg.LogFile, "/") {
+			mproc.cfg.LogFile = Cfg.LogDir + "/" + mproc.cfg.LogFile
 		}
-		mproc.checkCfg = proc.Check
 	}
 	procTable.mlk.Unlock()
 }

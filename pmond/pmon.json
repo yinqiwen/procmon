@@ -14,6 +14,10 @@
                 "Addr": "127.0.0.1:7788",
                 "Timeout":5,
                 "Period": 10
+            },
+            "Crash":{
+                "Prefix" : "panic: runtime error:",
+                "Command": ["bash", "-c", "mail -s 'Gort crash at ${HOSTNAME}!' user@domain.com  <<< '${CrashContent}'"]
             }
         }
           ]
